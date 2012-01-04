@@ -117,6 +117,8 @@ generator/stamp-generator
 .git-module-status
 /gnulib
 /GNUmakefile
+gobject/Guestfs-1.0.gir
+gobject/Guestfs-1.0.typelib
 .guestfs-*
 guestfs.*
 guestfsd-in-wine.log
