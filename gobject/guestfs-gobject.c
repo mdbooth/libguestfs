@@ -46,14 +46,6 @@ struct _GuestfsSessionPrivate
 
 G_DEFINE_TYPE(GuestfsSession, guestfs_session, G_TYPE_OBJECT);
 
-#define GUESTFS_SESSION_ERROR guestfs_session_error_quark()
-
-static GQuark
-guestfs_session_error_quark(void)
-{
-  return g_quark_from_static_string("guestfs-session");
-}
-
 static void
 guestfs_session_finalize(GObject *object)
 {
@@ -72,6 +64,9 @@ guestfs_session_class_init(GuestfsSessionClass *klass)
 
   object_class->finalize = guestfs_session_finalize;
 
+  g_value_register_transform_func(G_TYPE_BOOLEAN, G_TYPE_VARIANT,
+                                  _transform_boolean_variant);
+
   g_type_class_add_private(klass, sizeof(GuestfsSessionPrivate));
 }
 
@@ -79,7 +74,6 @@ static void
 guestfs_session_init(GuestfsSession *session)
 {
   session->priv = GUESTFS_SESSION_GET_PRIVATE(session);
-
   session->priv->g = guestfs_create();
 }
 
@@ -95,6 +89,153 @@ guestfs_session_new(void)
 {
   return GUESTFS_SESSION(g_object_new(GUESTFS_TYPE_SESSION, NULL));
 }
+
+/* Guestfs::Tristate */
+GType
+guestfs_tristate_get_type(void)
+{
+  static GType etype = 0;
+  if (etype == 0) {
+    static const GEnumValue values[] = {
+      { GUESTFS_TRISTATE_FALSE, "GUESTFS_TRISTATE_FALSE", "false" },
+      { GUESTFS_TRISTATE_TRUE,  "GUESTFS_TRISTATE_TRUE",  "true" },
+      { GUESTFS_TRISTATE_NONE,  "GUESTFS_TRISTATE_NONE",  "none" },
+      { 0, NULL, NULL }
+    };
+    etype = g_enum_register_static("GuestfsTristate", values);
+  }
+  return etype;
+}
+
+/* Optarg objects */
+
+#define GUESTFS_ADD_DRIVE_OPTS_GET_PRIVATE(obj) (G_TYPE_INSTANCE_GET_PRIVATE ( \
+                                                 (obj), \
+                                                 GUESTFS_TYPE_ADD_DRIVE_OPTS, \
+                                                 GuestfsAddDriveOptsPrivate))
+
+struct _GuestfsAddDriveOptsPrivate
+{
+  GuestfsTristate readonly;
+  gchar *format;
+  gchar *iface;
+  gchar *name;
+};
+
+G_DEFINE_TYPE(GuestfsAddDriveOpts, guestfs_add_drive_opts, G_TYPE_OBJECT);
+
+enum {
+  PROP_GUESTFS_ADD_DRIVE_OPTS_READONLY = 1,
+  PROP_GUESTFS_ADD_DRIVE_OPTS_FORMAT,
+  PROP_GUESTFS_ADD_DRIVE_OPTS_IFACE,
+  PROP_GUESTFS_ADD_DRIVE_OPTS_NAME
+};
+
+static void
+guestfs_add_drive_opts_set_property(GObject *object,
+                                    guint property_id,
+                                    const GValue *value,
+                                    GParamSpec *pspec)
+{
+  GuestfsAddDriveOpts *self = GUESTFS_ADD_DRIVE_OPTS(object);
+  GuestfsAddDriveOptsPrivate *priv = self->priv;
+
+  switch (property_id) {
+    case PROP_GUESTFS_ADD_DRIVE_OPTS_READONLY:
+      priv->readonly = g_value_get_enum(value);
+      break;
+
+    default:
+      /* Invalid property */
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
+  }
+}
+
+static void
+guestfs_add_drive_opts_get_property(GObject *object,
+                                    guint property_id,
+                                    GValue *value,
+                                    GParamSpec *pspec)
+{
+  GuestfsAddDriveOpts *self = GUESTFS_ADD_DRIVE_OPTS(object);
+  GuestfsAddDriveOptsPrivate *priv = self->priv;
+
+  switch (property_id) {
+    case PROP_GUESTFS_ADD_DRIVE_OPTS_READONLY:
+      g_value_set_enum(value, priv->readonly);
+      break;
+    
+    default:
+      /* Invalid property */
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
+  }
+}
+
+static void
+guestfs_add_drive_opts_finalize(GObject *object)
+{
+  GuestfsAddDriveOpts *self = GUESTFS_ADD_DRIVE_OPTS(object);
+  GuestfsAddDriveOptsPrivate *priv = self->priv;
+
+  g_free(priv->format);
+  g_free(priv->iface);
+  g_free(priv->name);
+
+  G_OBJECT_CLASS(guestfs_add_drive_opts_parent_class)->finalize(object);
+}
+
+static void
+guestfs_add_drive_opts_class_init(GuestfsAddDriveOptsClass *klass)
+{
+  GObjectClass *object_class = G_OBJECT_CLASS(klass);
+  GParamSpec *pspec;
+
+  object_class->set_property = guestfs_add_drive_opts_set_property;
+  object_class->get_property = guestfs_add_drive_opts_get_property;
+
+  pspec = g_param_spec_enum("readonly", "readonly", NULL,
+                            GUESTFS_TYPE_TRISTATE, GUESTFS_TRISTATE_NONE,
+                            G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+  g_object_class_install_property(object_class,
+                                  PROP_GUESTFS_ADD_DRIVE_OPTS_READONLY, pspec);
+
+  object_class->finalize = guestfs_add_drive_opts_finalize;
+
+  g_type_class_add_private(klass, sizeof(GuestfsAddDriveOptsPrivate));
+}
+
+static void
+guestfs_add_drive_opts_init(GuestfsAddDriveOpts *o)
+{
+  o->priv = GUESTFS_ADD_DRIVE_OPTS_GET_PRIVATE(o);
+  /* memset may not be necessary. Need to find out if gobject instantiation
+   * already zeroes private struct */
+  memset(o->priv, 0, sizeof(GuestfsAddDriveOptsPrivate));
+}
+
+/**
+ * guestfs_add_drive_opts_new:
+ *
+ * Create a new GuestfsAddDriveOpts
+ *
+ * Returns: (transfer full): a new GuestfsAddDriveOpts
+ */
+GuestfsAddDriveOpts *
+guestfs_add_drive_opts_new(void)
+{
+  return GUESTFS_ADD_DRIVE_OPTS(g_object_new(GUESTFS_TYPE_ADD_DRIVE_OPTS, NULL));
+}
+
+/* Error quark */
+
+#define GUESTFS_ERROR guestfs_error_quark()
+
+static GQuark
+guestfs_error_quark(void)
+{
+  return g_quark_from_static_string("guestfs");
+}
+
 
 /* Structs */
 static GuestfsVersion *
@@ -141,7 +282,7 @@ guestfs_session_add_drive(GuestfsSession *session, gchar *filename,
   guestfs_h *g = session->priv->g;
   if (guestfs_add_drive(g, filename) == 0) return TRUE;
 
-  g_set_error_literal(err, GUESTFS_SESSION_ERROR, 0, guestfs_last_error(g));
+  g_set_error_literal(err, GUESTFS_ERROR, 0, guestfs_last_error(g));
   return FALSE;
 }
 
@@ -164,7 +305,7 @@ guestfs_session_launch(GuestfsSession *session, GError **err)
   guestfs_h *g = session->priv->g;
   if (guestfs_launch(g) == 0) return TRUE;
 
-  g_set_error_literal(err, GUESTFS_SESSION_ERROR, 0, guestfs_last_error(g));
+  g_set_error_literal(err, GUESTFS_ERROR, 0, guestfs_last_error(g));
   return FALSE;
 }
 
@@ -212,7 +353,7 @@ guestfs_session_version(GuestfsSession *session, GError **err)
   guestfs_h *g = session->priv->g;
   struct guestfs_version *v = guestfs_version(g);
   if (v == NULL) {
-    g_set_error_literal(err, GUESTFS_SESSION_ERROR, 0, guestfs_last_error(g));
+    g_set_error_literal(err, GUESTFS_ERROR, 0, guestfs_last_error(g));
     return NULL;
   }
 
