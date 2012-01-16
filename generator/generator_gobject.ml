@@ -1,5 +1,5 @@
 (* libguestfs
- * Copyright (C) 2011 Red Hat Inc.
+ * Copyright (C) 2012 Red Hat Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -37,6 +37,10 @@ let rec camel_of_name flags name =
         a ^ String.uppercase (Str.first_chars b 1) ^ Str.string_after b 1
     ) "" (Str.split (regexp "_") name)
 
+and returns_error (ret:Generator_types.ret) = match ret with
+  | RConstOptString _ -> false
+  | _ -> true
+
 and generate_gobject_proto name (ret, args, optargs) flags =
   (match ret with
    | RErr ->
@@ -46,30 +50,28 @@ and generate_gobject_proto name (ret, args, optargs) flags =
    | RInt64 _ ->
       pr "gint64 "
    | RBool _ ->
-      pr "gint "
-   | RConstString _ 
+      pr "gint8 "
+   | RConstString _
    | RConstOptString _
    | RString _ ->
       pr "gchar *"
    | RStringList _ ->
-      pr "GSList *"
+      pr "gchar **"
    | RStruct (_, typ) ->
       let name = camel_name_of_struct typ in
       pr "Guestfs%s *" name
-   | RStructList _ ->
-      pr "GSList *"
+   | RStructList (_, typ) ->
+      let name = camel_name_of_struct typ in
+      pr "Guestfs%s **" name
    | RHashtable _ ->
       pr "GHashTable *"
    | RBufferOut _ ->
-      pr "GByteArray *"
+      pr "guint *"
   );
-  pr "%s(GuestfsSession *session, " name;
-  let comma = ref false in
+  pr "guestfs_session_%s(GuestfsSession *session" name;
   List.iter (
     fun arg ->
-      if !comma then pr ", ";
-      comma := true;
-
+      pr ", ";
       match arg with
       | Bool n ->
         pr "gboolean %s" n
@@ -88,9 +90,9 @@ and generate_gobject_proto name (ret, args, optargs) flags =
         pr "const gchar *%s" n
       | StringList n
       | DeviceList n ->
-        pr "GSList *%s" n
+        pr "const gchar **%s" n
       | BufferIn n ->
-        pr "GByteArray *%s" n
+        pr "const guint8 *%s, gsize %s_size" n n
       | Pointer _ ->
         failwith "gobject bindings do not support Pointer arguments"
   ) args;
@@ -98,9 +100,10 @@ and generate_gobject_proto name (ret, args, optargs) flags =
     pr ", %s *optargs" (camel_of_name flags name)
   );
   (match ret with
-  | RConstOptString _ -> ()
-  | _ ->
-    pr ", GError **err");
+  | RBufferOut _ ->
+    pr ", gsize *size_r"
+  | _ -> ());
+  if returns_error ret then pr ", GError **err";
   pr ")";
 
 and generate_gobject_header_static () =
@@ -168,35 +171,35 @@ and generate_gobject_header_structs () =
   pr "/* Structs */\n";
   List.iter (
     fun (typ, cols) ->
-    let camel = camel_name_of_struct typ in
-    pr "typedef struct _Guestfs%s Guestfs%s;\n" camel camel;
-    pr "struct _Guestfs%s {\n" camel;
-    List.iter (
-      function
-      | name, FChar ->
-        pr "  gchar %s;\n" name
-      | name, FUInt32 ->
-        pr "  guint32 %s;\n" name
-      | name, FInt32 ->
-        pr "  gint32 %s;\n" name
-      | name, (FUInt64|FBytes) ->
-        pr "  guint64 %s;\n" name
-      | name, FInt64 ->
-        pr "  gint64 %s;\n" name
-      | name, FString ->
-        pr "  gchar *%s;\n" name
-      | name, FBuffer ->
-        pr "  GByteArray *%s;\n" name
-      | name, FUUID ->
-        pr "  /* The next field is NOT nul-terminated, be careful when printing it: */\n";
-        pr "  gchar %s[32];\n" name
-      | name, FOptPercent ->
-        pr "  /* The next field is [0..100] or -1 meaning 'not present': */\n";
-        pr "  gfloat %s;\n" name
-
-    ) cols;
-    pr "};\n";
-    pr "GType guestfs_%s_get_type(void);\n\n" typ;
+      let camel = camel_name_of_struct typ in
+      pr "typedef struct _Guestfs%s Guestfs%s;\n" camel camel;
+      pr "struct _Guestfs%s {\n" camel;
+      List.iter (
+        function
+        | n, FChar ->
+          pr "  gchar %s;\n" n
+        | n, FUInt32 ->
+          pr "  guint32 %s;\n" n
+        | n, FInt32 ->
+          pr "  gint32 %s;\n" n
+        | n, (FUInt64|FBytes) ->
+          pr "  guint64 %s;\n" n
+        | n, FInt64 ->
+          pr "  gint64 %s;\n" n
+        | n, FString ->
+          pr "  gchar *%s;\n" n
+        | n, FBuffer ->
+          pr "  guint8 *%s;\n" n;
+          pr "  guint32 %s_size;\n" n
+        | n, FUUID ->
+          pr "  /* The next field is NOT nul-terminated, be careful when printing it: */\n";
+          pr "  gchar %s[32];\n" n
+        | n, FOptPercent ->
+          pr "  /* The next field is [0..100] or -1 meaning 'not present': */\n";
+          pr "  gfloat %s;\n" n
+      ) cols;
+      pr "};\n";
+      pr "GType guestfs_%s_get_type(void);\n\n" typ;
   ) structs;
 
 and iter_optargs f =
@@ -321,9 +324,6 @@ guestfs_session_class_init(GuestfsSessionClass *klass)
 
   object_class->finalize = guestfs_session_finalize;
 
-  g_value_register_transform_func(G_TYPE_BOOLEAN, G_TYPE_VARIANT,
-                                  _transform_boolean_variant);
-
   g_type_class_add_private(klass, sizeof(GuestfsSessionPrivate));
 }
 
@@ -404,7 +404,7 @@ and generate_gobject_c_optarg name optargs flags =
   let uc_name = String.uppercase name in
   let camel_name = camel_of_name flags name in
   let type_define = "GUESTFS_TYPE_" ^ uc_name in
-  
+
   pr "/* %s */\n" camel_name;
   pr "#define GUESTFS_%s_GET_PRIVATE(obj) " uc_name;
   pr "(G_TYPE_INSTANCE_GET_PRIVATE((obj), %s, %sPrivate))\n\n"
@@ -575,10 +575,11 @@ and generate_gobject_c_methods () =
   pr "/* Generated methods */\n\n";
 
   List.iter (
-    fun (name, (ret, args, optargs), _, flags, _, shortdesc, longdesc) ->
+    fun (name, (ret, args, optargs as style), _, flags, _, shortdesc, longdesc) ->
       let doc = pod2text ~width:60 name longdesc in
       let doc = String.concat "\n * " doc in
       let camel_name = camel_of_name flags name in
+      let is_RBufferOut = match ret with RBufferOut _ -> true | _ -> false in
 
       pr "/**\n";
       pr " * %s\n" shortdesc;
@@ -596,12 +597,12 @@ and generate_gobject_c_methods () =
             pr " (transfer none) (type utf8) (allow-none):"
           | Device _ | Pathname _ | Dev_or_Path _ | FileIn _ | FileOut _ ->
             pr " (transfer none) (type filename):"
-          | StringList n ->
-            pr " (transfer none) (array length=%s_len) (element-type utf8): an array of strings" n
-          | DeviceList n ->
-            pr " (transfer none) (array length=%s_len) (element-type filename): an array of strings" n
+          | StringList _ ->
+            pr " (transfer none) (array zero-terminated=1) (element-type utf8): an array of strings"
+          | DeviceList _ ->
+            pr " (transfer none) (array zero-terminated=1) (element-type filename): an array of strings"
           | BufferIn n ->
-            pr " (transfer none) (array length=%s_len) (element-type guint8): an array of binary data" n
+            pr " (transfer none) (array length=%s_size) (element-type guint8): an array of binary data" n
           | Pointer _ ->
             failwith "gobject bindings do not support Pointer arguments"
           );
@@ -624,20 +625,139 @@ and generate_gobject_c_methods () =
       | RString _ ->
         pr "(transfer full): the returned string, or NULL on error"
       | RStringList _ ->
-        pr "(transfer full) (array length=outlen) (element-type utf8): an array of returned strings, or NULL on error"
+        pr "(transfer full) (array zero-terminated=1) (element-type utf8): an array of returned strings, or NULL on error"
       | RHashtable _ ->
         pr "(transfer full) (element-type utf8 utf8): a GHashTable of results, or NULL on error"
       | RBufferOut _ ->
-        pr "(transfer full) (array length=outlen) (element-type guint8): an array of binary data, or NULL on error"
+        pr "(transfer full) (array length=size_r) (element-type guint8): an array of binary data, or NULL on error"
       | RStruct (_, typ) ->
          let name = camel_name_of_struct typ in
          pr "(transfer full): a %s object, or NULL on error" name
       | RStructList (_, typ) ->
          let name = camel_name_of_struct typ in
-         pr "(transfer full) (array length=outlen) (element-type %s): an array of %s objects, or NULL on error" name name
+         pr "(transfer full) (array zero-terminated=1) (element-type %s): an array of %s objects, or NULL on error" name name
       );
       pr "\n";
-      pr " */\n\n";
+      pr " */\n";
+
+      generate_gobject_proto name style flags;
+      pr "{\n";
+      pr "  guestfs_h *g = session->priv->g;\n";
+
+      let gen_copy_struct indent src dst typ =
+        pr "%s%s *%s = g_slice_new(%s);\n" indent camel_name dst camel_name;
+        List.iter (
+          function
+          | n, (FChar|FUInt32|FInt32|FUInt64|FBytes|FInt64
+                |FUUID|FOptPercent) ->
+            pr "%s%s->%s = %s->%s;\n" indent dst n src n 
+          | n, FString ->
+            pr "%s%s->%s = g_strdup(%s->%s);\n" indent dst n src n
+          | n, FBuffer ->
+            pr "%s%s->%s = %s->%s\n;" indent dst n src n;
+            pr "%s%s->%s_size = %s->%s_size\n;" indent dst n src n
+        ) (cols_of_struct typ);
+        pr "  guestfs_free_%s(ret);\n" typ in
+
+      pr "  ";
+      (match ret with
+      | RErr | RInt _ | RBool _ ->
+        pr "int "
+      | RInt64 _ ->
+        pr "int64_t "
+      | RConstString _ | RConstOptString _ ->
+        pr "const char *"
+      | RString _ | RBufferOut _ ->
+        pr "char *"
+      | RStringList _ | RHashtable _ ->
+        pr "char **"
+      | RStruct (_, typ) ->
+        pr "struct guestfs_%s *" typ
+      | RStructList (_, typ) ->
+        pr "struct guestfs_%s_list *" typ
+      );
+      pr "ret = guestfs_%s(g" name;
+      List.iter (
+        fun argt ->
+          pr ", ";
+          match argt with
+          | BufferIn n ->
+            pr "%s, %s_size" n n
+          | Bool n | Int n | Int64 n | String n | Device n | Pathname n
+          | Dev_or_Path n | OptString n | StringList n | DeviceList n
+          | Key n | FileIn n | FileOut n ->
+            pr "%s" n
+          | Pointer _ ->
+            failwith "gobject bindings do not support Pointer arguments"
+      ) args;
+      if is_RBufferOut then pr ", size_r";
+      pr ");\n";
+
+      if returns_error ret then (
+        pr "  if (ret == %s) {\n"
+          (match ret with
+          | RErr | RInt _ | RInt64 _ | RBool _ ->
+            "-1"
+          | RConstString _ | RString _ | RStringList _ | RHashtable _
+          | RBufferOut _ | RStruct _ | RStructList _ ->
+            "NULL"
+          | RConstOptString _ ->
+            assert false;
+          );
+        pr "    g_set_error_literal(err, GUESTFS_ERROR, 0, guestfs_last_error(g));\n";
+        pr "    return %s;\n"
+          (match ret with
+          | RErr ->
+            "FALSE"
+          | RInt _ | RInt64 _ | RBool _ ->
+            "-1"
+          | RConstString _ | RString _ | RStringList _ | RHashtable _
+          | RBufferOut _ | RStruct _ | RStructList _ ->
+            "NULL"
+          | RConstOptString _ ->
+            assert false;
+          );
+        pr "  }\n";
+      );
+      pr "\n";
+
+      (match ret with
+      | RErr ->
+        pr "  return TRUE;\n"
+
+      | RInt _ | RInt64 _ | RBool _
+      | RConstString _ | RConstOptString _
+      | RString _ | RStringList _
+      | RBufferOut _ ->
+        pr "  return ret;\n"
+
+      | RHashtable _ ->
+        pr "  GHashTable *h = g_hash_table_new_full(g_str_equal, g_str_equal, g_free, g_free);\n";
+        pr "  char **i = ret;\n";
+        pr "  while (*i) {\n";
+        pr "    char *key = *i; i++;\n";
+        pr "    char *value = *i; i++;\n";
+        pr "    g_hash_table_insert(h, key, value);\n";
+        pr "  }\n;";
+        pr "  free (ret);\n";
+        pr "  return h;\n"
+
+      | RStruct (_, typ) ->
+        gen_copy_struct "  " "ret" "s" typ;
+        pr "  return s;\n";
+
+      | RStructList (_, typ) ->
+        pr "  %s **l = g_malloc(sizeof %s* * (ret->len + 1));\n" camel_name camel_name;
+        pr "  gsize_t i;\n";
+        pr "  for(i = 0; i < ret->len; i++) {\n";
+        gen_copy_struct "    " "ret->val[i]" "s" typ;
+        pr "    l[i] = s;\n";
+        pr "  }\n";
+        pr "  l[i] = NULL;\n";
+        pr "  return l;\n";
+      );
+
+      pr "}\n\n";
   ) all_functions;
 
 and generate_gobject_header () =
