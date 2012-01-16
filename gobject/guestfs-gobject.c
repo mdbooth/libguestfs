@@ -64,9 +64,6 @@ guestfs_session_class_init(GuestfsSessionClass *klass)
 
   object_class->finalize = guestfs_session_finalize;
 
-  g_value_register_transform_func(G_TYPE_BOOLEAN, G_TYPE_VARIANT,
-                                  _transform_boolean_variant);
-
   g_type_class_add_private(klass, sizeof(GuestfsSessionPrivate));
 }
 
