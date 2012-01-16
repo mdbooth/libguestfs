@@ -41,34 +41,37 @@ and returns_error (ret:Generator_types.ret) = match ret with
   | RConstOptString _ -> false
   | _ -> true
 
-and generate_gobject_proto name (ret, args, optargs) flags =
+and generate_gobject_proto name ?(single_line = true)
+                                (ret, args, optargs) flags =
+  let spacer = if single_line then " " else "\n" in
+  let ptr_spacer = if single_line then "" else "\n" in
   (match ret with
    | RErr ->
-      pr "gboolean "
+      pr "gboolean%s" spacer
    | RInt _ ->
-      pr "gint32 "
+      pr "gint32%s" spacer
    | RInt64 _ ->
-      pr "gint64 "
+      pr "gint64%s" spacer
    | RBool _ ->
-      pr "gint8 "
+      pr "gint8%s" spacer
    | RConstString _
    | RConstOptString _
    | RString _ ->
-      pr "gchar *"
+      pr "gchar *%s" ptr_spacer
    | RStringList _ ->
-      pr "gchar **"
+      pr "gchar **%s" ptr_spacer
    | RStruct (_, typ) ->
       let name = camel_name_of_struct typ in
-      pr "Guestfs%s *" name
+      pr "Guestfs%s *%s" name ptr_spacer
    | RStructList (_, typ) ->
       let name = camel_name_of_struct typ in
-      pr "Guestfs%s **" name
+      pr "Guestfs%s **%s" name ptr_spacer
    | RHashtable _ ->
-      pr "GHashTable *"
+      pr "GHashTable *%s" ptr_spacer
    | RBufferOut _ ->
-      pr "guint *"
+      pr "guint *%s" ptr_spacer
   );
-  pr "guestfs_session_%s(GuestfsSession *session" name;
+  pr "guestfs_session_%ss(GuestfsSession *session" name;
   List.iter (
     fun arg ->
       pr ", ";
@@ -581,6 +584,9 @@ and generate_gobject_c_methods () =
       let camel_name = camel_of_name flags name in
       let is_RBufferOut = match ret with RBufferOut _ -> true | _ -> false in
 
+      (* The comment header, including GI annotations for arguments and the
+      return value *)
+
       pr "/**\n";
       pr " * %s\n" shortdesc;
       pr " *\n";
@@ -640,24 +646,47 @@ and generate_gobject_c_methods () =
       pr "\n";
       pr " */\n";
 
-      generate_gobject_proto name style flags;
+      (* The function body *)
+
+      generate_gobject_proto ~single_line:false name style flags;
       pr "{\n";
       pr "  guestfs_h *g = session->priv->g;\n";
 
-      let gen_copy_struct indent src dst typ =
-        pr "%s%s *%s = g_slice_new(%s);\n" indent camel_name dst camel_name;
+      (* Optargs *)
+
+      if optargs <> [] then (
+        pr "  struct guestfs_%s_argv argv;\n" name;
+        pr "  struct guestfs_%s_argv *argvp = NULL;\n\n" name;
+
+        pr "  if (optargs) {\n";
+        let uc_prefix = "GUESTFS_" ^ String.uppercase name in
+        pr "    GValue *v;\n";
+        pr "    argv.bitmask = 0;\n";
+        let set_property name typ get_typ unset =
+          let uc_name = String.uppercase name in
+          pr "    g_object_get_property(optargs, \"%s\", v);\n" name;
+          pr "    %s%s = g_value_get_%s(v);\n" typ name get_typ;
+          pr "    if (%s != %s) {\n" name unset;
+          pr "      argv.bitmask |= %s_%s_BITMASK;\n" uc_prefix uc_name;
+          pr "      argv.%s = %s;\n" name name;
+          pr "    }\n"
+        in
         List.iter (
           function
-          | n, (FChar|FUInt32|FInt32|FUInt64|FBytes|FInt64
-                |FUUID|FOptPercent) ->
-            pr "%s%s->%s = %s->%s;\n" indent dst n src n 
-          | n, FString ->
-            pr "%s%s->%s = g_strdup(%s->%s);\n" indent dst n src n
-          | n, FBuffer ->
-            pr "%s%s->%s = %s->%s\n;" indent dst n src n;
-            pr "%s%s->%s_size = %s->%s_size\n;" indent dst n src n
-        ) (cols_of_struct typ);
-        pr "  guestfs_free_%s(ret);\n" typ in
+          | OBool n ->
+            set_property n "GuestfsTristate " "enum" "GUESTFS_TRISTATE_NONE"
+          | OInt n ->
+            set_property n "gint32 " "int" "-1"
+          | OInt64 n ->
+            set_property n "gint64" "int64" "-1"
+          | OString n ->
+            set_property n "gchar *" "string" "NULL"
+        ) optargs;
+        pr "    argvp = &argv;\n";
+        pr "  }\n"
+      );
+
+      (* libguestfs call *)
 
       pr "  ";
       (match ret with
@@ -676,7 +705,8 @@ and generate_gobject_c_methods () =
       | RStructList (_, typ) ->
         pr "struct guestfs_%s_list *" typ
       );
-      pr "ret = guestfs_%s(g" name;
+      let suffix = if optargs <> [] then "_argv" else "" in
+      pr "ret = guestfs_%s%s(g" name suffix;
       List.iter (
         fun argt ->
           pr ", ";
@@ -691,7 +721,10 @@ and generate_gobject_c_methods () =
             failwith "gobject bindings do not support Pointer arguments"
       ) args;
       if is_RBufferOut then pr ", size_r";
+      if optargs <> [] then pr ", argvp";
       pr ");\n";
+
+      (* Check return, throw error if necessary, marshall return value *)
 
       if returns_error ret then (
         pr "  if (ret == %s) {\n"
@@ -721,6 +754,20 @@ and generate_gobject_c_methods () =
       );
       pr "\n";
 
+      let gen_copy_struct indent src dst typ =
+        pr "%s%s *%s = g_slice_new(%s);\n" indent camel_name dst camel_name;
+        List.iter (
+          function
+          | n, (FChar|FUInt32|FInt32|FUInt64|FBytes|FInt64
+                |FUUID|FOptPercent) ->
+            pr "%s%s->%s = %s->%s;\n" indent dst n src n 
+          | n, FString ->
+            pr "%s%s->%s = g_strdup(%s->%s);\n" indent dst n src n
+          | n, FBuffer ->
+            pr "%s%s->%s = %s->%s\n;" indent dst n src n;
+            pr "%s%s->%s_size = %s->%s_size\n;" indent dst n src n
+        ) (cols_of_struct typ);
+        pr "  guestfs_free_%s(ret);\n" typ in
       (match ret with
       | RErr ->
         pr "  return TRUE;\n"

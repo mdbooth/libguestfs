@@ -137,8 +137,8 @@ Run it from the top source directory using the command
   output_to "php/extension/guestfs_php.c" generate_php_c;
   output_to "erlang/guestfs.erl" generate_erlang_erl;
   output_to "erlang/erl-guestfs.c" generate_erlang_c;
-  output_to "gobject/test.h" generate_gobject_header;
-  output_to "gobject/test.c" generate_gobject_c;
+  output_to "gobject/guestfs-gobject.h" generate_gobject_header;
+  output_to "gobject/guestfs-gobject.c" generate_gobject_c;
 
   (* Generate the list of files generated -- last. *)
   printf "generated %d lines of code\n" (get_lines_generated ());
