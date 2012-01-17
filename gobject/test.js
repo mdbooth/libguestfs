@@ -5,20 +5,13 @@ const Guestfs = imports.gi.Guestfs;
 
 print('Starting');
 var g = new Guestfs.Session();
-//g.add_drive('/home/mbooth/tmp/foo.img');
-//g.launch();
 
-var v = g.version();
+var o = new Guestfs.AddDriveOpts({format: 'raw', iface: 'virtio'});
+g.add_drive_opts('../tests/guests/fedora.img', null);
+g.launch();
 
-//var o = new Guestfs.AddDriveOpts({readonly: 3});
-var o = new Guestfs.AddDriveOpts();
-print(o.readonly);
-o.readonly = true;
-print(o.readonly);
-o.readonly = false;
-print(o.readonly);
-o.readonly = Guestfs.Tristate.NONE;
-print(o.readonly);
+r = g.inspect_os();
+m = g.inspect_get_mountpoints(r[0]);
+print(m['/boot']);
 
-print(v.major + '.' + v.minor + '.' + v.release);
 print('Finished');
