@@ -1,3 +1,6 @@
+BUILT_SOURCES = guestfs-gobject.h guestfs-gobject.c
+EXTRA_DIST = $(BUILT_SOURCES)
+
 libname = libguestfs-gobject-1.0.la
 
 lib_LTLIBRARIES = $(libname)
@@ -13,7 +16,7 @@ libguestfs_gobject_1_0_la_LIBADD = -lguestfs
 
 -include $(INTROSPECTION_MAKEFILE)
 INTROSPECTION_GIRS =
-INTROSPECTION_SCANNER_ARGS = --add-include-path=$(srcdir)
+INTROSPECTION_SCANNER_ARGS = --add-include-path=$(srcdir) --warn-all
 INTROSPECTION_COMPILER_ARGS = --includedir=$(srcdir)
 
 if HAVE_INTROSPECTION
@@ -22,7 +25,7 @@ introspection_sources = \
   $(libguestfs_gobject_1_0_la_SOURCES)
 
 Guestfs-1.0.gir: $(libname)
-Guestfs_1_0_gir_INCLUDES = GObject-2.0
+Guestfs_1_0_gir_INCLUDES = GObject-2.0 Gio-2.0
 Guestfs_1_0_gir_CFLAGS = $(INCLUDES)
 Guestfs_1_0_gir_LIBS = $(libname)
 Guestfs_1_0_gir_FILES = $(introspection_sources)

@@ -702,12 +702,13 @@ and generate_gobject_c_methods () =
 
         pr "  if (optargs) {\n";
         let uc_prefix = "GUESTFS_" ^ String.uppercase name in
-        pr "    GValue *v;\n";
-        pr "    argv.bitmask = 0;\n";
-        let set_property name typ get_typ unset =
+        pr "    argv.bitmask = 0;\n\n";
+        let set_property name typ v_typ get_typ unset =
           let uc_name = String.uppercase name in
-          pr "    g_object_get_property(G_OBJECT(optargs), \"%s\", v);\n" name;
-          pr "    %s%s = g_value_get_%s(v);\n" typ name get_typ;
+          pr "    GValue %s_v = {0, };\n" name;
+          pr "    g_value_init(&%s_v, %s);\n" name v_typ;
+          pr "    g_object_get_property(G_OBJECT(optargs), \"%s\", &%s_v);\n" name name;
+          pr "    %s%s = g_value_get_%s(&%s_v);\n" typ name get_typ name;
           pr "    if (%s != %s) {\n" name unset;
           pr "      argv.bitmask |= %s_%s_BITMASK;\n" uc_prefix uc_name;
           pr "      argv.%s = %s;\n" name name;
@@ -716,13 +717,13 @@ and generate_gobject_c_methods () =
         List.iter (
           function
           | OBool n ->
-            set_property n "GuestfsTristate " "enum" "GUESTFS_TRISTATE_NONE"
+            set_property n "GuestfsTristate " "GUESTFS_TYPE_TRISTATE" "enum" "GUESTFS_TRISTATE_NONE"
           | OInt n ->
-            set_property n "gint32 " "int" "-1"
+            set_property n "gint32 " "G_TYPE_INT" "int" "-1"
           | OInt64 n ->
-            set_property n "gint64 " "int64" "-1"
+            set_property n "gint64 " "G_TYPE_INT64" "int64" "-1"
           | OString n ->
-            set_property n "const gchar *" "string" "NULL"
+            set_property n "const gchar *" "G_TYPE_STRING" "string" "NULL"
         ) optargs;
         pr "    argvp = &argv;\n";
         pr "  }\n"
