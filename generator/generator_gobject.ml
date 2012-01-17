@@ -55,7 +55,8 @@ and generate_gobject_proto name ?(single_line = true)
    | RBool _ ->
       pr "gint8%s" spacer
    | RConstString _
-   | RConstOptString _
+   | RConstOptString _ ->
+      pr "const gchar *%s" ptr_spacer
    | RString _ ->
       pr "gchar *%s" ptr_spacer
    | RStringList _ ->
@@ -69,9 +70,9 @@ and generate_gobject_proto name ?(single_line = true)
    | RHashtable _ ->
       pr "GHashTable *%s" ptr_spacer
    | RBufferOut _ ->
-      pr "guint *%s" ptr_spacer
+      pr "guint8 *%s" ptr_spacer
   );
-  pr "guestfs_session_%ss(GuestfsSession *session" name;
+  pr "guestfs_session_%s(GuestfsSession *session" name;
   List.iter (
     fun arg ->
       pr ", ";
@@ -93,7 +94,7 @@ and generate_gobject_proto name ?(single_line = true)
         pr "const gchar *%s" n
       | StringList n
       | DeviceList n ->
-        pr "const gchar **%s" n
+        pr "gchar *const *%s" n
       | BufferIn n ->
         pr "const guint8 *%s, gsize %s_size" n n
       | Pointer _ ->
@@ -106,6 +107,8 @@ and generate_gobject_proto name ?(single_line = true)
   | RBufferOut _ ->
     pr ", gsize *size_r"
   | _ -> ());
+  if List.exists (function Cancellable -> true | _ -> false) flags then
+    pr ", GCancellable *cancellable";
   if returns_error ret then pr ", GError **err";
   pr ")";
 
@@ -115,6 +118,7 @@ and generate_gobject_header_static () =
 #define GUESTFS_GOBJECT_H__
 
 #include <glib-object.h>
+#include <gio/gio.h>
 
 G_BEGIN_DECLS
 
@@ -168,6 +172,14 @@ typedef enum
 GType guestfs_tristate_get_type(void);
 #define GUESTFS_TYPE_TRISTATE (guestfs_tristate_get_type())
 
+"
+
+and generate_gobject_header_static_footer () =
+  pr "
+
+G_END_DECLS
+
+#endif /* GUESTFS_GOBJECT_H__ */
 "
 
 and generate_gobject_header_structs () =
@@ -377,6 +389,14 @@ guestfs_error_quark(void)
   return g_quark_from_static_string(\"guestfs\");
 }
 
+/* Cancellation handler */
+static void
+cancelled_handler(gpointer data)
+{
+  guestfs_h *g = (guestfs_h *)data;
+  guestfs_user_cancel(g);
+}
+
 "
 
 and generate_gobject_c_structs () =
@@ -481,10 +501,10 @@ and generate_gobject_c_optarg name optargs flags =
       let uc_optname = String.uppercase optname in
       pr "    case PROP_GUESTFS_%s_%s:\n" uc_name uc_optname;
       let set_value_func = match optargt with
-      | OBool _   -> "g_value_set_enum"
-      | OInt _    -> "g_value_set_int"
-      | OInt64 _  -> "g_value_set_int64"
-      | OString _ -> "g_value_set_string"
+      | OBool _   -> "enum"
+      | OInt _    -> "int"
+      | OInt64 _  -> "int64"
+      | OString _ -> "string"
       in
       pr "      g_value_set_%s(value, priv->%s);\n" set_value_func optname;
       pr "      break;\n\n";
@@ -526,14 +546,14 @@ and generate_gobject_c_optarg name optargs flags =
       pr "  pspec = ";
       (match optargt with
       | OBool n ->
-        pr "g_param_spec_boolean(\"%s\", \"%s\", NULL, " optname optname;
+        pr "g_param_spec_enum(\"%s\", \"%s\", NULL, " optname optname;
         pr "GUESTFS_TYPE_TRISTATE, GUESTFS_TRISTATE_NONE, ";
       | OInt n ->
         pr "g_param_spec_int(\"%s\", \"%s\", NULL, " optname optname;
         pr "G_MININT32, G_MAXINT32, -1, ";
       | OInt64 n ->
         pr "g_param_spec_int64(\"%s\", \"%s\", NULL, " optname optname;
-        pr "G_MININT32, G_MAXINT32, -1, ";
+        pr "G_MININT64, G_MAXINT64, -1, ";
       | OString n ->
         pr "g_param_spec_string(\"%s\", \"%s\", NULL, " optname optname;
         pr "NULL, ");
@@ -543,14 +563,14 @@ and generate_gobject_c_optarg name optargs flags =
   ) optargs;
 
   pr "  object_class->finalize = guestfs_%s_finalize;\n" name;
-  pr "  g_type_class_add_private(klass, sizeof %sPrivate);\n" camel_name;
+  pr "  g_type_class_add_private(klass, sizeof(%sPrivate));\n" camel_name;
   pr "}\n\n";
 
   pr "static void\nguestfs_%s_init(%s *o)\n" name camel_name;
   pr "{\n";
   pr "  o->priv = GUESTFS_%s_GET_PRIVATE(o);\n" uc_name;
   pr "  /* XXX: Find out if gobject already zeroes private structs */\n";
-  pr "  memset(o->priv, 0, sizeof %sPrivate);\n" camel_name;
+  pr "  memset(o->priv, 0, sizeof(%sPrivate));\n" camel_name;
   pr "}\n\n";
 
   pr "/**\n";
@@ -583,14 +603,22 @@ and generate_gobject_c_methods () =
       let doc = String.concat "\n * " doc in
       let camel_name = camel_of_name flags name in
       let is_RBufferOut = match ret with RBufferOut _ -> true | _ -> false in
+      let error_return = match ret with
+      | RErr ->
+        "FALSE"
+      | RInt _ | RInt64 _ | RBool _ ->
+        "-1"
+      | RConstString _ | RString _ | RStringList _ | RHashtable _
+      | RBufferOut _ | RStruct _ | RStructList _ ->
+        "NULL"
+      | RConstOptString _ -> ""
+      in
 
       (* The comment header, including GI annotations for arguments and the
       return value *)
 
       pr "/**\n";
-      pr " * %s\n" shortdesc;
-      pr " *\n";
-      pr " * %s\n" doc;
+      pr " * guestfs_session_%s:\n" name;
 
       List.iter (
         fun argt ->
@@ -618,6 +646,10 @@ and generate_gobject_c_methods () =
         pr " * @optargs: (transfer none) (allow-none): a %s containing optional arguments\n" camel_name;
       pr " *\n";
 
+      pr " * %s\n" shortdesc;
+      pr " *\n";
+      pr " * %s\n" doc;
+
       pr " * Returns: ";
       (match ret with
       | RErr ->
@@ -641,7 +673,7 @@ and generate_gobject_c_methods () =
          pr "(transfer full): a %s object, or NULL on error" name
       | RStructList (_, typ) ->
          let name = camel_name_of_struct typ in
-         pr "(transfer full) (array zero-terminated=1) (element-type %s): an array of %s objects, or NULL on error" name name
+         pr "(transfer full) (array zero-terminated=1) (element-type Guestfs%s): an array of %s objects, or NULL on error" name name
       );
       pr "\n";
       pr " */\n";
@@ -649,7 +681,17 @@ and generate_gobject_c_methods () =
       (* The function body *)
 
       generate_gobject_proto ~single_line:false name style flags;
-      pr "{\n";
+      pr "\n{\n";
+
+      let cancellable =
+        List.exists (function Cancellable -> true | _ -> false) flags
+      in
+      if cancellable then (
+        pr "  /* Check we haven't already been cancelled */\n";
+        pr "  if (g_cancellable_set_error_if_cancelled (cancellable, err))\n";
+        pr "    return %s;\n\n" error_return;
+      );
+
       pr "  guestfs_h *g = session->priv->g;\n";
 
       (* Optargs *)
@@ -664,7 +706,7 @@ and generate_gobject_c_methods () =
         pr "    argv.bitmask = 0;\n";
         let set_property name typ get_typ unset =
           let uc_name = String.uppercase name in
-          pr "    g_object_get_property(optargs, \"%s\", v);\n" name;
+          pr "    g_object_get_property(G_OBJECT(optargs), \"%s\", v);\n" name;
           pr "    %s%s = g_value_get_%s(v);\n" typ name get_typ;
           pr "    if (%s != %s) {\n" name unset;
           pr "      argv.bitmask |= %s_%s_BITMASK;\n" uc_prefix uc_name;
@@ -678,15 +720,24 @@ and generate_gobject_c_methods () =
           | OInt n ->
             set_property n "gint32 " "int" "-1"
           | OInt64 n ->
-            set_property n "gint64" "int64" "-1"
+            set_property n "gint64 " "int64" "-1"
           | OString n ->
-            set_property n "gchar *" "string" "NULL"
+            set_property n "const gchar *" "string" "NULL"
         ) optargs;
         pr "    argvp = &argv;\n";
         pr "  }\n"
       );
 
       (* libguestfs call *)
+
+      if cancellable then (
+        pr "  gulong id = 0;\n";
+        pr "  if (cancellable) {\n";
+        pr "    id = g_cancellable_connect(cancellable,\n";
+        pr "                               G_CALLBACK(cancelled_handler),\n";
+        pr "                               g, NULL);\n";
+        pr "  }\n\n";
+      );
 
       pr "  ";
       (match ret with
@@ -724,6 +775,9 @@ and generate_gobject_c_methods () =
       if optargs <> [] then pr ", argvp";
       pr ");\n";
 
+      if cancellable then
+        pr "  g_cancellable_disconnect(cancellable, id);\n";
+
       (* Check return, throw error if necessary, marshall return value *)
 
       if returns_error ret then (
@@ -738,36 +792,28 @@ and generate_gobject_c_methods () =
             assert false;
           );
         pr "    g_set_error_literal(err, GUESTFS_ERROR, 0, guestfs_last_error(g));\n";
-        pr "    return %s;\n"
-          (match ret with
-          | RErr ->
-            "FALSE"
-          | RInt _ | RInt64 _ | RBool _ ->
-            "-1"
-          | RConstString _ | RString _ | RStringList _ | RHashtable _
-          | RBufferOut _ | RStruct _ | RStructList _ ->
-            "NULL"
-          | RConstOptString _ ->
-            assert false;
-          );
+        pr "    return %s;\n" error_return;
         pr "  }\n";
       );
       pr "\n";
 
       let gen_copy_struct indent src dst typ =
-        pr "%s%s *%s = g_slice_new(%s);\n" indent camel_name dst camel_name;
+        let struct_name = "Guestfs" ^ camel_name_of_struct typ in
+        pr "%s%s *%s = g_slice_new(%s);\n" indent struct_name dst struct_name;
         List.iter (
           function
-          | n, (FChar|FUInt32|FInt32|FUInt64|FBytes|FInt64
-                |FUUID|FOptPercent) ->
-            pr "%s%s->%s = %s->%s;\n" indent dst n src n 
+          | n, (FChar|FUInt32|FInt32|FUInt64|FBytes|FInt64|FOptPercent) ->
+            pr "%s%s->%s = %s%s;\n" indent dst n src n 
+          | n, FUUID ->
+            pr "%smemcpy(%s->%s, %s%s, sizeof(%s->%s));\n"
+              indent dst n src n dst n
           | n, FString ->
-            pr "%s%s->%s = g_strdup(%s->%s);\n" indent dst n src n
+            pr "%s%s->%s = g_strdup(%s%s);\n" indent dst n src n
           | n, FBuffer ->
-            pr "%s%s->%s = %s->%s\n;" indent dst n src n;
-            pr "%s%s->%s_size = %s->%s_size\n;" indent dst n src n
-        ) (cols_of_struct typ);
-        pr "  guestfs_free_%s(ret);\n" typ in
+            pr "%s%s->%s = %s%s;\n" indent dst n src n;
+            pr "%s%s->%s_size = %s%s_len;\n" indent dst n src n
+        ) (cols_of_struct typ)
+      in
       (match ret with
       | RErr ->
         pr "  return TRUE;\n"
@@ -779,27 +825,30 @@ and generate_gobject_c_methods () =
         pr "  return ret;\n"
 
       | RHashtable _ ->
-        pr "  GHashTable *h = g_hash_table_new_full(g_str_equal, g_str_equal, g_free, g_free);\n";
+        pr "  GHashTable *h = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);\n";
         pr "  char **i = ret;\n";
         pr "  while (*i) {\n";
         pr "    char *key = *i; i++;\n";
         pr "    char *value = *i; i++;\n";
         pr "    g_hash_table_insert(h, key, value);\n";
-        pr "  }\n;";
-        pr "  free (ret);\n";
+        pr "  };\n";
+        pr "  g_free(ret);\n";
         pr "  return h;\n"
 
       | RStruct (_, typ) ->
-        gen_copy_struct "  " "ret" "s" typ;
+        gen_copy_struct "  " "ret->" "s" typ;
+        pr "  guestfs_free_%s(ret);\n" typ;
         pr "  return s;\n";
 
       | RStructList (_, typ) ->
-        pr "  %s **l = g_malloc(sizeof %s* * (ret->len + 1));\n" camel_name camel_name;
-        pr "  gsize_t i;\n";
+        let struct_name = "Guestfs" ^ camel_name_of_struct typ in
+        pr "  %s **l = g_malloc(sizeof(%s*) * (ret->len + 1));\n" struct_name struct_name;
+        pr "  gsize i;\n";
         pr "  for(i = 0; i < ret->len; i++) {\n";
-        gen_copy_struct "    " "ret->val[i]" "s" typ;
+        gen_copy_struct "    " "ret->val[i]." "s" typ;
         pr "    l[i] = s;\n";
         pr "  }\n";
+        pr "  guestfs_free_%s_list(ret);\n" typ;
         pr "  l[i] = NULL;\n";
         pr "  return l;\n";
       );
@@ -813,6 +862,7 @@ and generate_gobject_header () =
   generate_gobject_header_structs ();
   generate_gobject_header_optargs ();
   generate_gobject_header_methods ();
+  generate_gobject_header_static_footer ();
 
 and generate_gobject_c () =
   generate_header CStyle GPLv2plus;
